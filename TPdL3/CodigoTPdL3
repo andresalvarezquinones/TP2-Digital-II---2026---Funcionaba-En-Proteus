@@ -1,0 +1,185 @@
+;------------------------------------------------------------------------------
+    LIST P=16F887
+    #INCLUDE <P16F887.INC>
+
+    __CONFIG _CONFIG1, _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOREN_ON & _IESO_OFF & _FCMEN_OFF & _LVP_OFF
+    __CONFIG _CONFIG2, _WRT_OFF & _BOR4V_BOR40V
+;------------------------------------------------------------------------------
+    CBLOCK 0x70
+        W_TEMP          
+        STATUS_TEMP     
+        CONT            
+        BCD_U           
+        BCD_D          
+        DISP_SEL        
+        BTN_SHIFT       
+        FLAGS           
+        TEMP            
+    ENDC
+
+    #define BTN_EVT   FLAGS,0   
+    #define BTN_LAST  FLAGS,1   
+;------------------------------------------------------------------------------
+    ORG 0x0000
+    GOTO INICIO
+
+    ORG 0x0004
+    GOTO ISR
+;------------------------------------------------------------------------------
+    ORG 0x0010
+SEVEN_SEG
+    ADDWF PCL,F
+    RETLW 0x3F   ; 0
+    RETLW 0x06   ; 1
+    RETLW 0x5B   ; 2
+    RETLW 0x4F   ; 3
+    RETLW 0x66   ; 4
+    RETLW 0x6D   ; 5
+    RETLW 0x7D   ; 6
+    RETLW 0x07   ; 7
+    RETLW 0x7F   ; 8
+    RETLW 0x6F   ; 9
+;------------------------------------------------------------------------------
+ISR
+    MOVWF W_TEMP
+    SWAPF STATUS,W
+    MOVWF STATUS_TEMP
+
+    BTFSS INTCON,T0IF
+    GOTO ISR_FIN
+    BCF INTCON,T0IF
+
+    ;--- Multiplexado de displays --------------------------------------------
+    BCF PORTC,0             ; apagar display de unidades
+    BCF PORTC,1             ; apagar display de decenas  
+
+    BTFSC DISP_SEL,0
+    GOTO MOSTRAR_DECENAS
+
+MOSTRAR_UNIDADES
+    MOVF BCD_U,W
+    CALL SEVEN_SEG
+    MOVWF PORTD
+    BSF PORTC,0             ; habilita transistor del display 0
+    GOTO MUX_FIN
+
+MOSTRAR_DECENAS
+    MOVF BCD_D,W
+    CALL SEVEN_SEG
+    MOVWF PORTD
+    BSF PORTC,1             ; habilita transistor del display 1
+
+MUX_FIN
+    MOVLW 0x01
+    XORWF DISP_SEL,F        ; alterna el digito a mostrar en la proxima interrupcion
+
+    BCF STATUS,C
+    BTFSC PORTA,0
+    BSF STATUS,C
+    RLF BTN_SHIFT,F
+
+    MOVF BTN_SHIFT,W
+    XORLW 0x00
+    BTFSC STATUS,Z
+    GOTO BTN_PRESIONADO
+
+    MOVF BTN_SHIFT,W
+    XORLW 0xFF
+    BTFSC STATUS,Z
+    GOTO BTN_LIBERADO
+
+    GOTO ISR_FIN
+
+BTN_PRESIONADO
+    BTFSS BTN_LAST          
+    GOTO ISR_FIN
+    BCF BTN_LAST
+    BSF BTN_EVT            
+    GOTO ISR_FIN
+
+BTN_LIBERADO
+    BSF BTN_LAST
+
+ISR_FIN
+    SWAPF STATUS_TEMP,W
+    MOVWF STATUS
+    SWAPF W_TEMP,F
+    SWAPF W_TEMP,W
+    RETFIE
+;------------------------------------------------------------------------------
+INICIO
+    BANKSEL ANSEL
+    CLRF ANSEL              
+    CLRF ANSELH             
+
+    BANKSEL TRISA
+    BSF   TRISA,0           
+    CLRF  TRISB             
+    BCF   TRISC,0           
+    BCF   TRISC,1           
+    CLRF  TRISD             
+
+    BSF OPTION_REG,7         
+    BCF OPTION_REG,5         
+    BCF OPTION_REG,3        
+    BSF OPTION_REG,2        
+    BCF OPTION_REG,1
+    BSF OPTION_REG,0
+                             
+    BANKSEL PORTA
+    CLRF PORTA
+    CLRF PORTB
+    CLRF PORTC
+    CLRF PORTD
+
+    CLRF CONT
+    CLRF BCD_U
+    CLRF BCD_D
+    CLRF DISP_SEL
+    CLRF BTN_SHIFT
+    CLRF FLAGS
+    BSF  BTN_LAST           
+
+    BSF INTCON,T0IE          
+    BCF INTCON,T0IF
+    BSF INTCON,GIE           
+;------------------------------------------------------------------------------
+MAIN
+    BTFSS BTN_EVT
+    GOTO MAIN
+
+    BCF BTN_EVT
+
+    ;--- Incremento contador ---
+    MOVLW .99
+    SUBWF CONT,W
+    BTFSC STATUS,Z
+    GOTO REINICIAR_CONT
+    INCF CONT,F
+    GOTO CONT_LISTO
+REINICIAR_CONT
+    CLRF CONT
+CONT_LISTO
+
+    MOVF CONT,W
+    MOVWF PORTB
+
+    ;--- Conversion binario -> BCD (division por 10 mediante restas) -------
+    CLRF BCD_D
+    MOVF CONT,W
+    MOVWF BCD_U
+    MOVLW .10
+    MOVWF TEMP
+DIV_LOOP
+    MOVF TEMP,W
+    SUBWF BCD_U,W            ; W = BCD_U - 10  (C=1 si no hubo prestamo)
+    BTFSS STATUS,C
+    GOTO DIV_FIN
+    MOVWF BCD_U
+    INCF BCD_D,F
+    GOTO DIV_LOOP
+DIV_FIN
+
+    GOTO MAIN
+
+    END
