@@ -1,29 +1,6 @@
 ;========================================================
 ; TdL4 - Cronómetro SS:CC con TMR0
 ; PIC16F887 - FOSC = 4 MHz (cristal XT)
-;
-; PINES
-;   RD0-RD6 -> segmentos a,b,c,d,e,f,g (bus compartido)
-;   RD7     -> punto decimal dp (opcional, solo en el display 2)
-;   RB1     -> display 1: decenas de segundos
-;   RB2     -> display 2: unidades de segundos (con punto decimal)
-;   RB3     -> display 3: decenas de centésimas
-;   RB4     -> display 4: unidades de centésimas
-;   RA0     -> pulsador (a GND, pull-up externo de 10 kOhm)
-;
-; SUPUESTOS DE NIVELES (cambiar si el circuito es distinto)
-;   Displays de cátodo común  -> segmento activo en alto
-;   Selectores activos en alto (transistor NPN a GND)
-;   Pulsador activo en bajo
-;
-; BASE DE TIEMPO
-;   TMR0 con reloj interno FOSC/4, prescaler 1:32, precarga 178
-;   T0 = (256-178) x 32 x 1 us = 2,496 ms
-;   4 interrupciones = 1 centésima (4 x T0 = 9,98 ms)
-;   Cada selector se activa cada 4 x T0 = ~10 ms (refresco ~100 Hz)
-;   Antirrebote: 8 muestras = 8 x T0 = ~20 ms (presión y liberación)
-;   Pulsación larga: 400 muestras = 400 x T0 = ~1 s desde la
-;   validación de la presión
 ;========================================================
 
         LIST    P=16F887
@@ -33,14 +10,7 @@
         __CONFIG _CONFIG1, _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOREN_OFF & _IESO_OFF & _FCMEN_OFF & _LVP_OFF
         __CONFIG _CONFIG2, _WRT_OFF & _BOR40V
 
-;--------------------------------------------------------
-; MODO DEPURACIÓN
-; Descomentar la línea siguiente para que "iniciar"
-; arranque desde DEBUG_SEG:DEBUG_CENT en vez de 00:00.
-; Ejemplos: 9 y 95 (prueba 09:99 -> 10:00)
-;           59 y 95 (prueba 59:99 -> 00:00)
-; DEJARLO COMENTADO EN EL PROGRAMA DEFINITIVO.
-;--------------------------------------------------------
+
 ;#define DEBUG
 DEBUG_SEG   EQU     .9
 DEBUG_CENT  EQU     .95
@@ -100,8 +70,7 @@ MASC_SEL    EQU     b'11100001' ; PORTB: bits que NO son selectores (RB1..RB4 = 
         GOTO    ISR
 
 ;--------------------------------------------------------
-; TABLAS (quedan en los primeros 256 words: el ADDWF PCL
-; no cruza un límite de página de 256)
+; TABLAS 
 ;--------------------------------------------------------
 ; Segmentos, cátodo común. bit0=a ... bit6=g, bit7=dp
 TABLA_7SEG:
@@ -125,3 +94,129 @@ TABLA_SEL:
         RETLW   b'00001000'     ; RB3 (display 3)
         RETLW   b'00010000'     ; RB4 (display 4)
 
+;========================================================
+; INTERRUPCIÓN (TMR0, cada ~2,5 ms)
+;========================================================
+ISR:
+        ; Guardar contexto
+        MOVWF   W_TEMP
+        SWAPF   STATUS,W
+        MOVWF   STATUS_TEMP
+        MOVF    PCLATH,W
+        MOVWF   PCLATH_TEMP
+        MOVF    FSR,W
+        MOVWF   FSR_TEMP
+        BCF     STATUS,RP0      ; banco 0
+        BCF     STATUS,RP1
+        BCF     STATUS,IRP
+        CLRF    PCLATH
+
+        BTFSS   INTCON,T0IF
+        GOTO    ISR_FIN
+
+        ; Recargar TMR0 y atender la bandera
+        MOVLW   PRECARGA
+        MOVWF   TMR0
+        BCF     INTCON,T0IF
+
+        ; 1) Multiplexado
+        CALL    ACTUALIZAR_DISPLAY
+
+        ; 2) Conteo de tiempo (solo ESTADO = 1)
+        BTFSS   ESTADO,0
+        GOTO    ISR_BOTON
+
+        INCF    TICK,F
+        MOVLW   TICKS_CENT
+        SUBWF   TICK,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_BOTON
+        CLRF    TICK
+
+        INCF    CENTESIMAS,F
+        MOVLW   .100
+        SUBWF   CENTESIMAS,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_BOTON
+        CLRF    CENTESIMAS
+
+        INCF    SEGUNDOS,F
+        MOVLW   .60
+        SUBWF   SEGUNDOS,W
+        BTFSC   STATUS,Z
+        CLRF    SEGUNDOS        ; 59:99 -> 00:00
+
+        ; 3) Pulsador (RA0 = 0 -> presionado)
+ISR_BOTON:
+        BTFSC   BTN_ESTADO,0
+        GOTO    BOTON_PRESIONADO
+
+        ; --- Estado estable: liberado ---
+        BTFSC   PORTA,0
+        GOTO    LIBERADO_SUELTO
+        INCF    DEB,F           ; RA0=0: posible presión
+        MOVLW   DEB_N
+        SUBWF   DEB,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+        ; Presión validada
+        CLRF    DEB
+        MOVLW   .1
+        MOVWF   BTN_ESTADO
+        CLRF    DUR_L
+        CLRF    DUR_H
+        CLRF    LARGA_HECHA
+        GOTO    ISR_FIN
+
+LIBERADO_SUELTO:
+        CLRF    DEB             ; rebote o nivel alto estable
+        GOTO    ISR_FIN
+
+        ; --- Estado estable: presionado ---
+BOTON_PRESIONADO:
+        BTFSS   PORTA,0
+        GOTO    SIGUE_PRESIONADO
+
+        INCF    DEB,F           ; RA0=1: posible liberación
+        MOVLW   DEB_N
+        SUBWF   DEB,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+        ; Liberación validada
+        CLRF    DEB
+        CLRF    BTN_ESTADO
+        BTFSC   LARGA_HECHA,0   ; si ya hubo larga, no hay corta
+        GOTO    ISR_FIN
+        MOVLW   .1
+        MOVWF   EV_CORTO
+        GOTO    ISR_FIN
+
+SIGUE_PRESIONADO:
+        CLRF    DEB
+        BTFSC   LARGA_HECHA,0   ; la larga actúa una sola vez
+        GOTO    ISR_FIN
+        INCF    DUR_L,F
+        BTFSC   STATUS,Z
+        INCF    DUR_H,F
+        MOVLW   LARGA_L         ; ¿DUR = 400?
+        XORWF   DUR_L,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+        MOVLW   LARGA_H
+        XORWF   DUR_H,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+        MOVLW   .1
+        MOVWF   LARGA_HECHA
+        MOVWF   EV_LARGO
+
+ISR_FIN:
+        MOVF    FSR_TEMP,W
+        MOVWF   FSR
+        MOVF    PCLATH_TEMP,W
+        MOVWF   PCLATH
+        SWAPF   STATUS_TEMP,W
+        MOVWF   STATUS
+        SWAPF   W_TEMP,F
+        SWAPF   W_TEMP,W
+        RETFIE
