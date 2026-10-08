@@ -10,7 +10,9 @@
         __CONFIG _CONFIG1, _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOREN_OFF & _IESO_OFF & _FCMEN_OFF & _LVP_OFF
         __CONFIG _CONFIG2, _WRT_OFF & _BOR40V
 
-
+;--------------------------------------------------------
+; MODO DEPURACIÓN
+;--------------------------------------------------------
 ;#define DEBUG
 DEBUG_SEG   EQU     .9
 DEBUG_CENT  EQU     .95
@@ -70,7 +72,7 @@ MASC_SEL    EQU     b'11100001' ; PORTB: bits que NO son selectores (RB1..RB4 = 
         GOTO    ISR
 
 ;--------------------------------------------------------
-; TABLAS 
+; TABLAS
 ;--------------------------------------------------------
 ; Segmentos, cátodo común. bit0=a ... bit6=g, bit7=dp
 TABLA_7SEG:
@@ -96,6 +98,9 @@ TABLA_SEL:
 
 ;========================================================
 ; INTERRUPCIÓN (TMR0, cada ~2,5 ms)
+;   1) multiplexado
+;   2) centésimas / segundos (solo si está contando)
+;   3) lectura del pulsador: antirrebote y duración
 ;========================================================
 ISR:
         ; Guardar contexto
@@ -220,3 +225,191 @@ ISR_FIN:
         SWAPF   W_TEMP,F
         SWAPF   W_TEMP,W
         RETFIE
+
+;========================================================
+; MULTIPLEXADO: apagar anterior, actualizar segmentos,
+; habilitar el siguiente. Un dígito por llamada.
+; Segmentos en PORTD, selectores en RB1..RB4 (PORTB).
+;========================================================
+ACTUALIZAR_DISPLAY:
+        MOVLW   MASC_SEL        ; 1) apagar los 4 selectores (RB1..RB4 = 0)
+        ANDWF   PORTB,F         ;    sin tocar RB0, RB5..RB7
+
+        MOVLW   D0              ; 2) leer el dígito D0+DIGITO
+        ADDWF   DIGITO,W
+        MOVWF   FSR
+        MOVF    INDF,W
+        CALL    TABLA_7SEG
+        MOVWF   TMP
+
+        MOVF    DIGITO,W        ; punto decimal en el dígito 1
+        XORLW   .1
+        BTFSC   STATUS,Z
+        BSF     TMP,7
+
+        MOVF    TMP,W
+        MOVWF   PORTD           ; segmentos nuevos
+
+        MOVF    DIGITO,W        ; 3) habilitar el selector
+        CALL    TABLA_SEL
+        IORWF   PORTB,F
+
+        INCF    DIGITO,F        ; siguiente dígito (0..3)
+        BCF     DIGITO,2
+        RETURN
+
+;========================================================
+; INICIALIZACIÓN
+;========================================================
+INICIO:
+        BANKSEL ANSEL           ; todo digital (RB1..RB4 son pines analógicos por defecto)
+        CLRF    ANSEL
+        CLRF    ANSELH
+
+        BANKSEL TRISB
+        MOVLW   b'11100001'     ; RB1-RB4 salidas (selectores), resto entradas
+        MOVWF   TRISB
+        CLRF    TRISD           ; RD0-RD7 salidas (segmentos + dp)
+        BSF     TRISA,0         ; RA0 entrada (pulsador)
+
+        ; TMR0: T0CS=0 (FOSC/4), PSA=0 (prescaler en TMR0),
+        ; PS=100 (1:32). RBPU=1 (pull-ups de PORTB apagados)
+        MOVLW   b'10000100'
+        MOVWF   OPTION_REG
+
+        BANKSEL PORTB
+        MOVLW   MASC_SEL
+        ANDWF   PORTB,F         ; selectores apagados
+        CLRF    PORTD           ; segmentos apagados
+
+        CLRF    TICK
+        CLRF    DIGITO
+        CLRF    CENTESIMAS
+        CLRF    SEGUNDOS
+        CLRF    ESTADO
+        CLRF    BTN_ESTADO
+        CLRF    DEB
+        CLRF    DUR_L
+        CLRF    DUR_H
+        CLRF    LARGA_HECHA
+        CLRF    EV_CORTO
+        CLRF    EV_LARGO
+        CLRF    D0
+        CLRF    D1
+        CLRF    D2
+        CLRF    D3
+
+        MOVLW   PRECARGA
+        MOVWF   TMR0
+
+        BCF     INTCON,T0IF
+        BSF     INTCON,T0IE
+        BSF     INTCON,GIE
+
+;========================================================
+; PROGRAMA PRINCIPAL (tareas no críticas)
+;========================================================
+MAIN:
+        BTFSC   EV_CORTO,0
+        CALL    ATENDER_CORTO
+        BTFSC   EV_LARGO,0
+        CALL    ATENDER_LARGO
+        CALL    ACTUALIZAR_NUMEROS
+        GOTO    MAIN
+
+;--------------------------------------------------------
+; Pulsación corta: 0 -> inicia, 1 -> pausa, 2 -> reanuda
+;--------------------------------------------------------
+ATENDER_CORTO:
+        CLRF    EV_CORTO
+        MOVF    ESTADO,F
+        BTFSC   STATUS,Z
+        GOTO    INICIAR
+        BTFSC   ESTADO,1        ; ESTADO = 2
+        GOTO    REANUDAR
+PAUSAR:
+        MOVLW   .2
+        MOVWF   ESTADO
+        RETURN
+REANUDAR:
+        MOVLW   .1
+        MOVWF   ESTADO
+        RETURN
+INICIAR:
+        CLRF    TICK
+        IFDEF   DEBUG
+        MOVLW   DEBUG_SEG
+        MOVWF   SEGUNDOS
+        MOVLW   DEBUG_CENT
+        MOVWF   CENTESIMAS
+        ELSE
+        CLRF    SEGUNDOS
+        CLRF    CENTESIMAS
+        ENDIF
+        MOVLW   .1
+        MOVWF   ESTADO          ; recién ahora empieza a contar
+        RETURN
+
+;--------------------------------------------------------
+; Pulsación larga: detiene y pone a cero (el barrido sigue)
+;--------------------------------------------------------
+ATENDER_LARGO:
+        CLRF    EV_LARGO
+        CLRF    ESTADO          ; primero detener el conteo
+        CLRF    TICK            ; acumulador de la centésima
+        CLRF    CENTESIMAS
+        CLRF    SEGUNDOS
+        RETURN
+
+;--------------------------------------------------------
+; Convierte SEGUNDOS y CENTESIMAS a 4 dígitos (D0..D3).
+; La copia inicial y la copia final se hacen con GIE=0 para
+; no leer valores a mitad de un cambio ni mostrar cifras mezcladas.
+;--------------------------------------------------------
+ACTUALIZAR_NUMEROS:
+        BCF     INTCON,GIE
+        BTFSC   INTCON,GIE
+        GOTO    $-2
+        MOVF    CENTESIMAS,W
+        MOVWF   C_COPIA
+        MOVF    SEGUNDOS,W
+        MOVWF   S_COPIA
+        BSF     INTCON,GIE
+
+        CLRF    DEC_C
+        CLRF    DEC_S
+
+CONV_CENT:
+        MOVLW   .10
+        SUBWF   C_COPIA,W
+        BTFSS   STATUS,C
+        GOTO    CONV_SEG
+        MOVWF   C_COPIA
+        INCF    DEC_C,F
+        GOTO    CONV_CENT
+
+CONV_SEG:
+        MOVLW   .10
+        SUBWF   S_COPIA,W
+        BTFSS   STATUS,C
+        GOTO    CONV_FIN
+        MOVWF   S_COPIA
+        INCF    DEC_S,F
+        GOTO    CONV_SEG
+
+CONV_FIN:
+        BCF     INTCON,GIE
+        BTFSC   INTCON,GIE
+        GOTO    $-2
+        MOVF    DEC_S,W
+        MOVWF   D0
+        MOVF    S_COPIA,W
+        MOVWF   D1
+        MOVF    DEC_C,W
+        MOVWF   D2
+        MOVF    C_COPIA,W
+        MOVWF   D3
+        BSF     INTCON,GIE
+        RETURN
+
+        END
