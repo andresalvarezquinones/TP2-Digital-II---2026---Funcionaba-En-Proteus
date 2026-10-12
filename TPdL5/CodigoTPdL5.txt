@@ -1,0 +1,171 @@
+;========================================================
+; TdL5 - Teclado matricial 4x4: ingreso y edici n de un
+;        valor decimal de 4 cifras (0000 a 9999)
+; PIC16F887 - FOSC = 4 MHz (cristal XT)
+;
+; PINES
+;   RD0-RD6 -> segmentos a,b,c,d,e,f,g (bus compartido)
+;   RD7     -> punto decimal dp (titila en la cifra en edici n)
+;   RB1     -> display 1: unidades de mil   (cifra 0)
+;   RB2     -> display 2: centenas          (cifra 1)
+;   RB3     -> display 3: decenas           (cifra 2)
+;   RB4     -> display 4: unidades          (cifra 3)
+;
+;   Teclado 4x4 (verificar con el mult metro antes de cablear):
+;   RC0-RC3 -> filas F0..F3   (salidas; fila activa = 0)
+;   RB0     -> columna C0     (entrada, pull-up interno)
+;   RB5     -> columna C1     (entrada, pull-up interno)
+;   RB6     -> columna C2     (entrada, pull-up interno)
+;   RB7     -> columna C3     (entrada, pull-up interno)
+;   RC6/RC7 -> reservados para el USB-UART (no se usan)
+;
+;   Distribuci n supuesta de las teclas:
+;          C0   C1   C2   C3
+;     F0    1    2    3    A
+;     F1    4    5    6    B
+;     F2    7    8    9    C
+;     F3    *    0    #    D
+;   Si el teclado real es distinto, SOLO se modifica TABLA_TECLAS.
+;
+; SUPUESTOS DE NIVELES (iguales al TdL4)
+;   Displays de c todo com n  -> segmento activo en alto
+;   Selectores activos en alto (transistor NPN a GND)
+;   Columnas en reposo = 1 (pull-up); tecla presionada en la
+;   fila activa = 0
+;
+; BASE DE TIEMPO (igual al TdL4)
+;   TMR0 con reloj interno FOSC/4, prescaler 1:32, precarga 178
+;   T0 = (256-178) x 32 x 1 us = 2,496 ms
+;   Cada interrupci n: 1 d gito del multiplexado + 1 barrido
+;   completo del teclado (las 4 filas)
+;   Refresco de cada display: 4 x T0 = ~10 ms (~100 Hz)
+;   Antirrebote: 8 lecturas iguales = 8 x T0 = ~20 ms
+;   Parpadeo del cursor: el dp cambia cada 100 x T0 = ~250 ms
+;   (encendido 250 ms, apagado 250 ms -> ~2 Hz)
+;========================================================
+
+        LIST    P=16F887
+        #include <P16F887.INC>
+        ERRORLEVEL -302         ; silenciar avisos de banco
+
+        __CONFIG _CONFIG1, _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOREN_OFF & _IESO_OFF & _FCMEN_OFF & _LVP_OFF
+        __CONFIG _CONFIG2, _WRT_OFF & _BOR40V
+
+;--------------------------------------------------------
+; CONSTANTES
+;--------------------------------------------------------
+PRECARGA    EQU     .178        ; precarga de TMR0
+DEB_N       EQU     .8          ; lecturas iguales para validar (~20 ms)
+MASC_SEL    EQU     b'11100001' ; PORTB: bits que NO son selectores (RB1..RB4 = 0)
+NINGUNA     EQU     0xFF        ; c digo "ninguna tecla presionada"
+FILAS_OFF   EQU     b'00001111' ; RC0..RC3 = 1 -> ninguna fila activa
+T_PARP      EQU     .100        ; interrupciones por medio per odo de parpadeo (~250 ms)
+
+; C digos de funci n que devuelve TABLA_TECLAS
+; (las cifras 0..9 se representan con su propio valor)
+K_A         EQU     0x0A        ; cursor a la izquierda
+K_B         EQU     0x0B        ; cursor a la derecha
+K_C         EQU     0x0C        ; borrar (0000)
+K_D         EQU     0x0D        ; confirmar
+K_AST       EQU     0x0E        ; * cancelar
+K_NUM       EQU     0x0F        ; # entrar a edici n
+
+;--------------------------------------------------------
+; VARIABLES (banco 0)
+;--------------------------------------------------------
+        CBLOCK  0x20
+        ; --- Multiplexado ---
+        DIGITO                  ; d gito que se muestra (0..3)
+        TMP                     ; auxiliar del multiplexado
+        CONT_PARP               ; cuenta interrupciones para el parpadeo
+        PARP                    ; bit0: 1 = dp encendido, 0 = dp apagado
+
+        ; --- Aplicaci n ---
+        MODO                    ; 0 = visualizaci n, 1 = edici n
+        CURSOR                  ; cifra seleccionada en edici n (0..3)
+        CONF0                   ; valor CONFIRMADO, 4 cifras BCD
+        CONF1                   ;   CONF0 = unidades de mil ... CONF3 = unidades
+        CONF2                   ;   (contiguas: se recorren con FSR)
+        CONF3
+        EDIT0                   ; valor EDITABLE (copia de trabajo)
+        EDIT1                   ;   EDIT0 = unidades de mil ... EDIT3 = unidades
+        EDIT2
+        EDIT3
+        SIMBOLO                 ; s mbolo de la tecla (0..9, K_A..K_NUM)
+
+        ; --- Capa f sica del teclado ---
+        FILA                    ; fila que se est  explorando (0..3)
+        MASC_FILA               ; patr n de PORTC con la fila activa en 0
+        COLUMNA                 ; columna detectada (0..3)
+        TEC_LEIDA               ;  ndice le do en este barrido (0..15 o NINGUNA)
+        TEC_ANTERIOR            ;  ndice le do en el barrido anterior
+        TEC_ESTABLE             ;  ltimo  ndice validado por el antirrebote
+        DEB                     ; contador de lecturas iguales
+        TEC_EVENTO              ;  ndice de la nueva tecla (lo pone la ISR)
+        EV_TECLA                ; bandera: hay una nueva tecla para atender
+        ENDC
+
+; Variables de contexto en zona com n a todos los bancos (0x70-0x7F)
+        CBLOCK  0x70
+        W_TEMP
+        STATUS_TEMP
+        PCLATH_TEMP
+        FSR_TEMP
+        ENDC
+
+;--------------------------------------------------------
+; VECTORES
+;--------------------------------------------------------
+        ORG     0x0000
+        GOTO    INICIO
+
+        ORG     0x0004
+        GOTO    ISR
+
+;--------------------------------------------------------
+; TABLAS (quedan en los primeros 256 words: el ADDWF PCL
+; no cruza un l mite de p gina de 256)
+;--------------------------------------------------------
+; Segmentos, c todo com n. bit0=a ... bit6=g, bit7=dp
+TABLA_7SEG:
+        ADDWF   PCL,F
+        RETLW   b'00111111'     ; 0
+        RETLW   b'00000110'     ; 1
+        RETLW   b'01011011'     ; 2
+        RETLW   b'01001111'     ; 3
+        RETLW   b'01100110'     ; 4
+        RETLW   b'01101101'     ; 5
+        RETLW   b'01111101'     ; 6
+        RETLW   b'00000111'     ; 7
+        RETLW   b'01111111'     ; 8
+        RETLW   b'01101111'     ; 9
+
+; M scara del selector de cada d gito en PORTB (activo en alto)
+TABLA_SEL:
+        ADDWF   PCL,F
+        RETLW   b'00000010'     ; RB1 (display 1)
+        RETLW   b'00000100'     ; RB2 (display 2)
+        RETLW   b'00001000'     ; RB3 (display 3)
+        RETLW   b'00010000'     ; RB4 (display 4)
+
+; Traducci n  ndice f sico (4 x FILA + COLUMNA) -> s mbolo.
+; Es el  nico punto que depende de la distribuci n del teclado.
+TABLA_TECLAS:
+        ADDWF   PCL,F
+        RETLW   .1              ; 0  = F0,C0
+        RETLW   .2              ; 1  = F0,C1
+        RETLW   .3              ; 2  = F0,C2
+        RETLW   K_A             ; 3  = F0,C3
+        RETLW   .4              ; 4  = F1,C0
+        RETLW   .5              ; 5  = F1,C1
+        RETLW   .6              ; 6  = F1,C2
+        RETLW   K_B             ; 7  = F1,C3
+        RETLW   .7              ; 8  = F2,C0
+        RETLW   .8              ; 9  = F2,C1
+        RETLW   .9              ; 10 = F2,C2
+        RETLW   K_C             ; 11 = F2,C3
+        RETLW   K_AST           ; 12 = F3,C0
+        RETLW   .0              ; 13 = F3,C1
+        RETLW   K_NUM           ; 14 = F3,C2
+        RETLW   K_D             ; 15 = F3,C3
+
