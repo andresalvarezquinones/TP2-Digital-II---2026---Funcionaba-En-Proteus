@@ -169,3 +169,423 @@ TABLA_TECLAS:
         RETLW   K_NUM           ; 14 = F3,C2
         RETLW   K_D             ; 15 = F3,C3
 
+;========================================================
+; INTERRUPCI N (TMR0, cada ~2,5 ms)
+;   0) base de tiempo del parpadeo del cursor
+;   1) multiplexado (un d gito por interrupci n)
+;   2) barrido del teclado (capa f sica)
+;   3) antirrebote y detecci n de nueva tecla
+;========================================================
+ISR:
+        ; Guardar contexto
+        MOVWF   W_TEMP
+        SWAPF   STATUS,W
+        MOVWF   STATUS_TEMP
+        MOVF    PCLATH,W
+        MOVWF   PCLATH_TEMP
+        MOVF    FSR,W
+        MOVWF   FSR_TEMP
+        BCF     STATUS,RP0      ; banco 0
+        BCF     STATUS,RP1
+        BCF     STATUS,IRP
+        CLRF    PCLATH
+
+        BTFSS   INTCON,T0IF
+        GOTO    ISR_FIN
+
+        ; Recargar TMR0 y atender la bandera
+        MOVLW   PRECARGA
+        MOVWF   TMR0
+        BCF     INTCON,T0IF
+
+        ; 0) Base de tiempo del parpadeo: cada T_PARP interrupciones
+        ;    se invierte PARP,0 (~250 ms encendido / ~250 ms apagado)
+        INCF    CONT_PARP,F
+        MOVLW   T_PARP
+        XORWF   CONT_PARP,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_MUX
+        CLRF    CONT_PARP
+        MOVLW   b'00000001'
+        XORWF   PARP,F          ; invertir el bit 0
+
+        ; 1) Multiplexado
+ISR_MUX:
+        CALL    ACTUALIZAR_DISPLAY
+
+        ; 2) Barrido: deja en TEC_LEIDA el  ndice 0..15 o NINGUNA
+        CALL    LEER_TECLADO
+
+        ; 3) Antirrebote
+        ;     La lectura es igual a la del barrido anterior?
+        MOVF    TEC_LEIDA,W
+        XORWF   TEC_ANTERIOR,W
+        BTFSC   STATUS,Z
+        GOTO    LECTURA_IGUAL
+
+        ; Lectura distinta: posible rebote o cambio -> reiniciar cuenta
+        MOVF    TEC_LEIDA,W
+        MOVWF   TEC_ANTERIOR
+        CLRF    DEB
+        GOTO    ISR_FIN
+
+LECTURA_IGUAL:
+        MOVLW   DEB_N           ; si ya se valid , no hacer nada
+        XORWF   DEB,W           ; (tecla sostenida o reposo estable)
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN
+
+        INCF    DEB,F           ; una lectura igual m s
+        MOVLW   DEB_N
+        XORWF   DEB,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+
+        ; Se alcanzaron DEB_N lecturas iguales: lectura v lida
+        MOVF    TEC_ANTERIOR,W
+        XORWF   TEC_ESTABLE,W   ;  cambi  respecto del estado estable?
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN
+
+        MOVF    TEC_ANTERIOR,W  ; nuevo estado estable
+        MOVWF   TEC_ESTABLE
+        XORLW   NINGUNA
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN         ; liberaci n validada: queda rearmado
+
+        ; Nueva tecla validada: un  nico evento
+        MOVF    TEC_ESTABLE,W
+        MOVWF   TEC_EVENTO
+        BSF     EV_TECLA,0
+
+ISR_FIN:
+        MOVF    FSR_TEMP,W
+        MOVWF   FSR
+        MOVF    PCLATH_TEMP,W
+        MOVWF   PCLATH
+        SWAPF   STATUS_TEMP,W
+        MOVWF   STATUS
+        SWAPF   W_TEMP,F
+        SWAPF   W_TEMP,W
+        RETFIE
+
+;========================================================
+; MULTIPLEXADO: apagar anterior, actualizar segmentos,
+; habilitar el siguiente. Un d gito por llamada.
+; En visualizaci n muestra CONF0..3; en edici n, EDIT0..3
+; con el punto decimal titilando en la cifra del cursor.
+;========================================================
+ACTUALIZAR_DISPLAY:
+        MOVLW   MASC_SEL        ; 1) apagar los 4 selectores (RB1..RB4 = 0)
+        ANDWF   PORTB,F         ;    sin tocar RB0, RB5..RB7
+
+        MOVLW   CONF0           ; 2) elegir qu  valor se muestra
+        BTFSC   MODO,0
+        MOVLW   EDIT0
+        ADDWF   DIGITO,W        ;    direcci n = base + DIGITO
+        MOVWF   FSR
+        MOVF    INDF,W
+        CALL    TABLA_7SEG
+        MOVWF   TMP
+
+        BTFSS   MODO,0          ; punto decimal: solo en edici n
+        GOTO    SIN_PUNTO
+        BTFSS   PARP,0          ; solo en la fase "encendido"
+        GOTO    SIN_PUNTO       ; del parpadeo
+        MOVF    DIGITO,W        ; y solo en la cifra seleccionada
+        XORWF   CURSOR,W
+        BTFSC   STATUS,Z
+        BSF     TMP,7
+SIN_PUNTO:
+        MOVF    TMP,W
+        MOVWF   PORTD           ; segmentos nuevos
+
+        MOVF    DIGITO,W        ; 3) habilitar el selector
+        CALL    TABLA_SEL
+        IORWF   PORTB,F
+
+        INCF    DIGITO,F        ; siguiente d gito (0..3)
+        BCF     DIGITO,2
+        RETURN
+;========================================================
+; INTERRUPCI N (TMR0, cada ~2,5 ms)
+;   0) base de tiempo del parpadeo del cursor
+;   1) multiplexado (un d gito por interrupci n)
+;   2) barrido del teclado (capa f sica)
+;   3) antirrebote y detecci n de nueva tecla
+;========================================================
+ISR:
+        ; Guardar contexto
+        MOVWF   W_TEMP
+        SWAPF   STATUS,W
+        MOVWF   STATUS_TEMP
+        MOVF    PCLATH,W
+        MOVWF   PCLATH_TEMP
+        MOVF    FSR,W
+        MOVWF   FSR_TEMP
+        BCF     STATUS,RP0      ; banco 0
+        BCF     STATUS,RP1
+        BCF     STATUS,IRP
+        CLRF    PCLATH
+
+        BTFSS   INTCON,T0IF
+        GOTO    ISR_FIN
+
+        ; Recargar TMR0 y atender la bandera
+        MOVLW   PRECARGA
+        MOVWF   TMR0
+        BCF     INTCON,T0IF
+
+        ; 0) Base de tiempo del parpadeo: cada T_PARP interrupciones
+        ;    se invierte PARP,0 (~250 ms encendido / ~250 ms apagado)
+        INCF    CONT_PARP,F
+        MOVLW   T_PARP
+        XORWF   CONT_PARP,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_MUX
+        CLRF    CONT_PARP
+        MOVLW   b'00000001'
+        XORWF   PARP,F          ; invertir el bit 0
+
+        ; 1) Multiplexado
+ISR_MUX:
+        CALL    ACTUALIZAR_DISPLAY
+
+        ; 2) Barrido: deja en TEC_LEIDA el  ndice 0..15 o NINGUNA
+        CALL    LEER_TECLADO
+
+        ; 3) Antirrebote
+        ;     La lectura es igual a la del barrido anterior?
+        MOVF    TEC_LEIDA,W
+        XORWF   TEC_ANTERIOR,W
+        BTFSC   STATUS,Z
+        GOTO    LECTURA_IGUAL
+
+        ; Lectura distinta: posible rebote o cambio -> reiniciar cuenta
+        MOVF    TEC_LEIDA,W
+        MOVWF   TEC_ANTERIOR
+        CLRF    DEB
+        GOTO    ISR_FIN
+
+LECTURA_IGUAL:
+        MOVLW   DEB_N           ; si ya se valid , no hacer nada
+        XORWF   DEB,W           ; (tecla sostenida o reposo estable)
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN
+
+        INCF    DEB,F           ; una lectura igual m s
+        MOVLW   DEB_N
+        XORWF   DEB,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+
+        ; Se alcanzaron DEB_N lecturas iguales: lectura v lida
+        MOVF    TEC_ANTERIOR,W
+        XORWF   TEC_ESTABLE,W   ;  cambi  respecto del estado estable?
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN
+
+        MOVF    TEC_ANTERIOR,W  ; nuevo estado estable
+        MOVWF   TEC_ESTABLE
+        XORLW   NINGUNA
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN         ; liberaci n validada: queda rearmado
+
+        ; Nueva tecla validada: un  nico evento
+        MOVF    TEC_ESTABLE,W
+        MOVWF   TEC_EVENTO
+        BSF     EV_TECLA,0
+
+ISR_FIN:
+        MOVF    FSR_TEMP,W
+        MOVWF   FSR
+        MOVF    PCLATH_TEMP,W
+        MOVWF   PCLATH
+        SWAPF   STATUS_TEMP,W
+        MOVWF   STATUS
+        SWAPF   W_TEMP,F
+        SWAPF   W_TEMP,W
+        RETFIE
+
+;========================================================
+; MULTIPLEXADO: apagar anterior, actualizar segmentos,
+; habilitar el siguiente. Un d gito por llamada.
+; En visualizaci n muestra CONF0..3; en edici n, EDIT0..3
+; con el punto decimal titilando en la cifra del cursor.
+;========================================================
+ACTUALIZAR_DISPLAY:
+        MOVLW   MASC_SEL        ; 1) apagar los 4 selectores (RB1..RB4 = 0)
+        ANDWF   PORTB,F         ;    sin tocar RB0, RB5..RB7
+
+        MOVLW   CONF0           ; 2) elegir qu  valor se muestra
+        BTFSC   MODO,0
+        MOVLW   EDIT0
+        ADDWF   DIGITO,W        ;    direcci n = base + DIGITO
+        MOVWF   FSR
+        MOVF    INDF,W
+        CALL    TABLA_7SEG
+        MOVWF   TMP
+
+        BTFSS   MODO,0          ; punto decimal: solo en edici n
+        GOTO    SIN_PUNTO
+        BTFSS   PARP,0          ; solo en la fase "encendido"
+        GOTO    SIN_PUNTO       ; del parpadeo
+        MOVF    DIGITO,W        ; y solo en la cifra seleccionada
+        XORWF   CURSOR,W
+        BTFSC   STATUS,Z
+        BSF     TMP,7
+SIN_PUNTO:
+        MOVF    TMP,W
+        MOVWF   PORTD           ; segmentos nuevos
+
+        MOVF    DIGITO,W        ; 3) habilitar el selector
+        CALL    TABLA_SEL
+        IORWF   PORTB,F
+
+        INCF    DIGITO,F        ; siguiente d gito (0..3)
+        BCF     DIGITO,2
+        RETURN
+
+;========================================================
+; INTERRUPCI N (TMR0, cada ~2,5 ms)
+;   0) base de tiempo del parpadeo del cursor
+;   1) multiplexado (un d gito por interrupci n)
+;   2) barrido del teclado (capa f sica)
+;   3) antirrebote y detecci n de nueva tecla
+;========================================================
+ISR:
+        ; Guardar contexto
+        MOVWF   W_TEMP
+        SWAPF   STATUS,W
+        MOVWF   STATUS_TEMP
+        MOVF    PCLATH,W
+        MOVWF   PCLATH_TEMP
+        MOVF    FSR,W
+        MOVWF   FSR_TEMP
+        BCF     STATUS,RP0      ; banco 0
+        BCF     STATUS,RP1
+        BCF     STATUS,IRP
+        CLRF    PCLATH
+
+        BTFSS   INTCON,T0IF
+        GOTO    ISR_FIN
+
+        ; Recargar TMR0 y atender la bandera
+        MOVLW   PRECARGA
+        MOVWF   TMR0
+        BCF     INTCON,T0IF
+
+        ; 0) Base de tiempo del parpadeo: cada T_PARP interrupciones
+        ;    se invierte PARP,0 (~250 ms encendido / ~250 ms apagado)
+        INCF    CONT_PARP,F
+        MOVLW   T_PARP
+        XORWF   CONT_PARP,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_MUX
+        CLRF    CONT_PARP
+        MOVLW   b'00000001'
+        XORWF   PARP,F          ; invertir el bit 0
+
+        ; 1) Multiplexado
+ISR_MUX:
+        CALL    ACTUALIZAR_DISPLAY
+
+        ; 2) Barrido: deja en TEC_LEIDA el  ndice 0..15 o NINGUNA
+        CALL    LEER_TECLADO
+
+        ; 3) Antirrebote
+        ;     La lectura es igual a la del barrido anterior?
+        MOVF    TEC_LEIDA,W
+        XORWF   TEC_ANTERIOR,W
+        BTFSC   STATUS,Z
+        GOTO    LECTURA_IGUAL
+
+        ; Lectura distinta: posible rebote o cambio -> reiniciar cuenta
+        MOVF    TEC_LEIDA,W
+        MOVWF   TEC_ANTERIOR
+        CLRF    DEB
+        GOTO    ISR_FIN
+
+LECTURA_IGUAL:
+        MOVLW   DEB_N           ; si ya se valid , no hacer nada
+        XORWF   DEB,W           ; (tecla sostenida o reposo estable)
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN
+
+        INCF    DEB,F           ; una lectura igual m s
+        MOVLW   DEB_N
+        XORWF   DEB,W
+        BTFSS   STATUS,Z
+        GOTO    ISR_FIN
+
+        ; Se alcanzaron DEB_N lecturas iguales: lectura v lida
+        MOVF    TEC_ANTERIOR,W
+        XORWF   TEC_ESTABLE,W   ;  cambi  respecto del estado estable?
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN
+
+        MOVF    TEC_ANTERIOR,W  ; nuevo estado estable
+        MOVWF   TEC_ESTABLE
+        XORLW   NINGUNA
+        BTFSC   STATUS,Z
+        GOTO    ISR_FIN         ; liberaci n validada: queda rearmado
+
+        ; Nueva tecla validada: un  nico evento
+        MOVF    TEC_ESTABLE,W
+        MOVWF   TEC_EVENTO
+        BSF     EV_TECLA,0
+
+ISR_FIN:
+        MOVF    FSR_TEMP,W
+        MOVWF   FSR
+        MOVF    PCLATH_TEMP,W
+        MOVWF   PCLATH
+        SWAPF   STATUS_TEMP,W
+        MOVWF   STATUS
+        SWAPF   W_TEMP,F
+        SWAPF   W_TEMP,W
+        RETFIE
+
+;========================================================
+; MULTIPLEXADO: apagar anterior, actualizar segmentos,
+; habilitar el siguiente. Un d gito por llamada.
+; En visualizaci n muestra CONF0..3; en edici n, EDIT0..3
+; con el punto decimal titilando en la cifra del cursor.
+;========================================================
+ACTUALIZAR_DISPLAY:
+        MOVLW   MASC_SEL        ; 1) apagar los 4 selectores (RB1..RB4 = 0)
+        ANDWF   PORTB,F         ;    sin tocar RB0, RB5..RB7
+
+        MOVLW   CONF0           ; 2) elegir qu  valor se muestra
+        BTFSC   MODO,0
+        MOVLW   EDIT0
+        ADDWF   DIGITO,W        ;    direcci n = base + DIGITO
+        MOVWF   FSR
+        MOVF    INDF,W
+        CALL    TABLA_7SEG
+        MOVWF   TMP
+
+        BTFSS   MODO,0          ; punto decimal: solo en edici n
+        GOTO    SIN_PUNTO
+        BTFSS   PARP,0          ; solo en la fase "encendido"
+        GOTO    SIN_PUNTO       ; del parpadeo
+        MOVF    DIGITO,W        ; y solo en la cifra seleccionada
+        XORWF   CURSOR,W
+        BTFSC   STATUS,Z
+        BSF     TMP,7
+SIN_PUNTO:
+        MOVF    TMP,W
+        MOVWF   PORTD           ; segmentos nuevos
+
+        MOVF    DIGITO,W        ; 3) habilitar el selector
+        CALL    TABLA_SEL
+        IORWF   PORTB,F
+
+        INCF    DIGITO,F        ; siguiente d gito (0..3)
+        BCF     DIGITO,2
+        RETURN
+
+
+
+
+
