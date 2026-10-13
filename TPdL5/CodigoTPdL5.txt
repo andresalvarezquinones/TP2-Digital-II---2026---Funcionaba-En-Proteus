@@ -701,10 +701,151 @@ INICIO:
         BCF     INTCON,T0IF
         BSF     INTCON,T0IE
         BSF     INTCON,GIE
+;========================================================
+; PROGRAMA PRINCIPAL (capa de aplicaci n)
+; Espera eventos de tecla, los traduce y ejecuta la
+; m quina de estados. Nunca espera a que se suelte una tecla.
+;========================================================
+MAIN:
+        BTFSS   EV_TECLA,0      ;  hay una tecla nueva?
+        GOTO    MAIN
 
+        ; Tomar el evento con GIE=0 (lectura y borrado sin interferencia)
+        BCF     INTCON,GIE
+        BTFSC   INTCON,GIE
+        GOTO    $-2
+        MOVF    TEC_EVENTO,W
+        BCF     EV_TECLA,0
+        BSF     INTCON,GIE
 
+        CALL    TABLA_TECLAS    ;  ndice f sico -> s mbolo
+        MOVWF   SIMBOLO
 
+        BTFSC   MODO,0
+        GOTO    EST_EDICION
 
+;--------------------------------------------------------
+; ESTADO VISUALIZACI N: solo responde a '#'
+;--------------------------------------------------------
+EST_VISUALIZACION:
+        MOVF    SIMBOLO,W
+        XORLW   K_NUM
+        BTFSS   STATUS,Z
+        GOTO    MAIN            ; cualquier otra tecla se ignora
 
+        ; Entrar a edici n: EDITABLE = CONFIRMADO, cursor en la cifra 0
+        MOVF    CONF0,W
+        MOVWF   EDIT0
+        MOVF    CONF1,W
+        MOVWF   EDIT1
+        MOVF    CONF2,W
+        MOVWF   EDIT2
+        MOVF    CONF3,W
+        MOVWF   EDIT3
+        CLRF    CURSOR
+        CALL    REINICIAR_PARPADEO
+        BSF     MODO,0          ; reci n ahora se muestra EDITABLE
+        GOTO    MAIN
+
+;--------------------------------------------------------
+; ESTADO EDICI N: cifras, A, B, C, D y * ('#' se ignora)
+;--------------------------------------------------------
+EST_EDICION:
+        MOVLW   .10             ;  SIMBOLO < 10? -> es una cifra
+        SUBWF   SIMBOLO,W
+        BTFSS   STATUS,C
+        GOTO    ED_CIFRA
+
+        MOVF    SIMBOLO,W
+        XORLW   K_A
+        BTFSC   STATUS,Z
+        GOTO    ED_IZQUIERDA
+
+        MOVF    SIMBOLO,W
+        XORLW   K_B
+        BTFSC   STATUS,Z
+        GOTO    ED_DERECHA
+
+        MOVF    SIMBOLO,W
+        XORLW   K_C
+        BTFSC   STATUS,Z
+        GOTO    ED_BORRAR
+
+        MOVF    SIMBOLO,W
+        XORLW   K_D
+        BTFSC   STATUS,Z
+        GOTO    ED_CONFIRMAR
+
+        MOVF    SIMBOLO,W
+        XORLW   K_AST
+        BTFSC   STATUS,Z
+        GOTO    ED_CANCELAR
+
+        GOTO    MAIN            ; '#' en edici n: sin efecto
+
+; 0..9: reemplaza la cifra del cursor y avanza (sin pasar de 3)
+ED_CIFRA:
+        MOVLW   EDIT0           ; FSR apunta a EDIT0 + CURSOR
+        ADDWF   CURSOR,W
+        MOVWF   FSR
+        MOVF    SIMBOLO,W
+        MOVWF   INDF
+        GOTO    ED_DERECHA      ; avanzar = mismo l mite que la tecla B
+
+; A: cursor a la izquierda (en la cifra 0 no tiene efecto)
+ED_IZQUIERDA:
+        MOVF    CURSOR,F
+        BTFSS   STATUS,Z
+        DECF    CURSOR,F
+        CALL    REINICIAR_PARPADEO
+        GOTO    MAIN
+
+; B: cursor a la derecha (en la cifra 3 no tiene efecto)
+ED_DERECHA:
+        MOVF    CURSOR,W
+        XORLW   .3
+        BTFSS   STATUS,Z
+        INCF    CURSOR,F
+        CALL    REINICIAR_PARPADEO
+        GOTO    MAIN
+
+; C: EDITABLE = 0000 y cursor a la cifra 0
+ED_BORRAR:
+        CLRF    EDIT0
+        CLRF    EDIT1
+        CLRF    EDIT2
+        CLRF    EDIT3
+        CLRF    CURSOR
+        CALL    REINICIAR_PARPADEO
+        GOTO    MAIN
+
+; D: CONFIRMADO = EDITABLE y volver a visualizaci n
+ED_CONFIRMAR:
+        MOVF    EDIT0,W
+        MOVWF   CONF0
+        MOVF    EDIT1,W
+        MOVWF   CONF1
+        MOVF    EDIT2,W
+        MOVWF   CONF2
+        MOVF    EDIT3,W
+        MOVWF   CONF3
+        CLRF    MODO            ; el cambio de modo va al final
+        GOTO    MAIN
+
+; *: descartar EDITABLE y volver a visualizaci n (CONFIRMADO intacto)
+ED_CANCELAR:
+        CLRF    MODO
+        GOTO    MAIN
+
+;--------------------------------------------------------
+; Reinicia el parpadeo en la fase "encendido", para que el
+; punto se vea apenas se entra a edici n o se mueve el cursor.
+;--------------------------------------------------------
+REINICIAR_PARPADEO:
+        CLRF    CONT_PARP
+        BSF     PARP,0
+        RETURN
+
+        END
 
 
