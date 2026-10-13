@@ -585,6 +585,125 @@ SIN_PUNTO:
         BCF     DIGITO,2
         RETURN
 
+;========================================================
+; LECTURA DEL TECLADO (capa f sica)
+; Activa una fila por vez (en 0) y lee las 4 columnas.
+; Resultado en TEC_LEIDA: 4 x FILA + COLUMNA, o NINGUNA.
+; No conoce el significado de las teclas.
+;========================================================
+LEER_TECLADO:
+        MOVLW   b'11111110'     ; empieza por F0 (RC0 = 0)
+        MOVWF   MASC_FILA
+        CLRF    FILA
+
+EXPLORAR_FILA:
+        MOVF    MASC_FILA,W
+        MOVWF   PORTC           ; activar la fila (RC4..RC7 son entradas)
+        NOP                     ; tiempo para que se estabilicen
+        NOP                     ; las columnas (~2 us)
+
+        BTFSS   PORTB,0         ; C0
+        GOTO    COL_0
+        BTFSS   PORTB,5         ; C1
+        GOTO    COL_1
+        BTFSS   PORTB,6         ; C2
+        GOTO    COL_2
+        BTFSS   PORTB,7         ; C3
+        GOTO    COL_3
+
+        ; Ninguna columna en 0: pasar a la fila siguiente
+        BSF     STATUS,C        ; entra un 1 por la derecha
+        RLF     MASC_FILA,F     ; 11111110 -> 11111101 -> ...
+        INCF    FILA,F
+        BTFSS   FILA,2          ;  FILA = 4? (se exploraron las 4)
+        GOTO    EXPLORAR_FILA
+
+        MOVLW   NINGUNA         ; ninguna tecla presionada
+        MOVWF   TEC_LEIDA
+        GOTO    LEER_FIN
+
+COL_0:  MOVLW   .0
+        GOTO    CALC_INDICE
+COL_1:  MOVLW   .1
+        GOTO    CALC_INDICE
+COL_2:  MOVLW   .2
+        GOTO    CALC_INDICE
+COL_3:  MOVLW   .3
+
+CALC_INDICE:                    ; TEC_LEIDA = 4 x FILA + COLUMNA
+        MOVWF   COLUMNA
+        MOVF    FILA,W
+        MOVWF   TEC_LEIDA
+        BCF     STATUS,C
+        RLF     TEC_LEIDA,F     ; x2
+        RLF     TEC_LEIDA,F     ; x4
+        MOVF    COLUMNA,W
+        ADDWF   TEC_LEIDA,F
+
+LEER_FIN:
+        MOVLW   FILAS_OFF       ; dejar todas las filas en 1
+        MOVWF   PORTC
+        RETURN
+
+;========================================================
+; INICIALIZACI N
+;========================================================
+INICIO:
+        BANKSEL ANSEL           ; todo digital (RB0..RB5 son anal gicos por defecto)
+        CLRF    ANSEL
+        CLRF    ANSELH
+
+        BANKSEL TRISB
+        MOVLW   b'11100001'     ; RB1-RB4 salidas (selectores)
+        MOVWF   TRISB           ; RB0, RB5-RB7 entradas (columnas)
+        MOVLW   b'11110000'     ; RC0-RC3 salidas (filas)
+        MOVWF   TRISC           ; RC4-RC7 entradas (RC6/RC7: UART)
+        CLRF    TRISD           ; RD0-RD7 salidas (segmentos + dp)
+
+        MOVLW   b'11100001'     ; pull-ups internos solo en las
+        MOVWF   WPUB            ; columnas (RB0, RB5, RB6, RB7)
+
+        ; TMR0: T0CS=0 (FOSC/4), PSA=0 (prescaler en TMR0),
+        ; PS=100 (1:32). RBPU=0 (habilita los pull-ups de PORTB)
+        MOVLW   b'00000100'
+        MOVWF   OPTION_REG
+
+        BANKSEL PORTB
+        MOVLW   MASC_SEL
+        ANDWF   PORTB,F         ; selectores apagados
+        CLRF    PORTD           ; segmentos apagados
+        MOVLW   FILAS_OFF
+        MOVWF   PORTC           ; filas inactivas (en 1)
+
+        CLRF    DIGITO
+        CLRF    MODO            ; arranca en visualizaci n
+        CLRF    CURSOR
+        CLRF    CONF0           ; valor inicial 0000
+        CLRF    CONF1
+        CLRF    CONF2
+        CLRF    CONF3
+        CLRF    EDIT0
+        CLRF    EDIT1
+        CLRF    EDIT2
+        CLRF    EDIT3
+        CLRF    DEB
+        CLRF    EV_TECLA
+        CLRF    CONT_PARP
+        CLRF    PARP
+        MOVLW   NINGUNA
+        MOVWF   TEC_LEIDA
+        MOVWF   TEC_ANTERIOR
+        MOVWF   TEC_ESTABLE
+
+        MOVLW   PRECARGA
+        MOVWF   TMR0
+
+        BCF     INTCON,T0IF
+        BSF     INTCON,T0IE
+        BSF     INTCON,GIE
+
+
+
 
 
 
